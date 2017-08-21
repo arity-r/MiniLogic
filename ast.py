@@ -1,3 +1,4 @@
+import re
 
 class Node:
 	def __init__(self, type, data, child=None):
@@ -45,6 +46,52 @@ class Node:
 		if self.child:
 			copy.child = list(c.__deepcopy__(memo) for c in self.child)
 		return copy
+
+def find_variables(node):
+	variables = set()
+	stack = [node]
+	while len(stack) > 0:
+		n = stack.pop()
+		if n.type == 'VARIABLE':
+			variables.add(n.data)
+		elif n.child:
+			stack.extend(n.child)
+	return variables
+
+def find_constants(node):
+	variables = set()
+	stack = [node]
+	while len(stack) > 0:
+		n = stack.pop()
+		if n.type == 'CONSTANT':
+			variables.add(n.data)
+		elif n.child:
+			stack.extend(n.child)
+	return variables
+
+def find_functions(node):
+	variables = set()
+	stack = [node]
+	while len(stack) > 0:
+		n = stack.pop()
+		if n.type == 'FUNCTION':
+			variables.add(n.data)
+		if n.child:
+			stack.extend(n.child)
+	return variables
+
+def resolve_variable_collisions(variables, used_variables):
+	var_dict = dict((v, v)
+		for v in variables.difference(used_variables))
+	for v in variables.intersection(used_variables):
+		m = re.match(r'(?P<base>.)(?P<suffix>[0-9]*)', v)
+		assert(m)
+		base, suffix = m.group('base'), m.group('suffix')
+		suffix = int(suffix) if len(suffix) > 0 else 1
+		while '%s%d'%(base, suffix) in used_variables:
+			suffix += 1
+		var_dict[v] = '%s%d'%(base, suffix)
+	return var_dict	
 
 def ast_to_string(node):
 	op_order = {

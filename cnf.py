@@ -1,5 +1,8 @@
+import re
 from copy import deepcopy
-from ast import Node, ast_to_string
+from ast import Node
+from ast import ast_to_string, find_constants, find_functions
+from ast import resolve_variable_collisions
 from petrick import petrick_method
 
 def eliminate_implication_and_iff(node):
@@ -32,7 +35,7 @@ def eliminate_implication_and_iff(node):
 	return node
 
 def move_negation(node, parent=None):
-	root_node = node if parent == None else None
+	node_node = node if parent == None else None
 	if node.type == 'NEG':
 		child = node.child[0]
 		if child.type == 'LOR' or child.type == 'LAND':
@@ -56,7 +59,7 @@ def move_negation(node, parent=None):
 				index = parent.child.index(node)
 				parent.child[index] = child.child[0]
 			top_node = move_negation(child.child[0], parent)
-			if top_node: root_node = top_node
+			if top_node: node_node = top_node
 			return top_node
 
 	if node.type == 'EXISTS' or node.type == 'FORALL':
@@ -65,123 +68,104 @@ def move_negation(node, parent=None):
 		for c in node.child:
 			move_negation(c, node)
 
-	return root_node
+	return node_node
 
-def standarize_variables(node, var_stack=[], var_map={}):
-	if node.type == 'EXISTS' or node.type == 'FORALL':
-		var_str = node.left.data
-		if var_str in var_stack:
-			n_found = 1
-			var_str_tmp = '%s%d' % (var_str, n_found)
-			while var_str_tmp in var_stack:
-				n_found += 1
-				var_str_tmp = '%s%d' % (var_str, n_found)
-			var_str = var_str_tmp
-		var_stack.append(var_str)
-		var_tmp = var_map.get(node.left.data, None)
-		var_map[node.left.data] = var_str
-		node.left.data = var_str
-		standarize_variables(node.right, var_stack, var_map)
-	elif node.type == 'VARIABLE':
-		node.data = var_map.get(node.data, node.data)
-	elif node.child:
-		for c in node.child:
-			standarize_variables(c, var_stack)
-
-	if node.type == 'EXISTS' or node.type == 'FORALL':
-		var_stack.pop()
-		if var_tmp:
-			var_map[node.left.data] = var_tmp
-		else:
-			del var_map[node.left.data]
-
+def standarize_variables(node):
+	used_variables = set()
+	variable_map = dict()
+	variable_map_from = dict()
+	stack = [(node, 0)]
+	while len(stack) > 0:
+		n, i = stack.pop()
+		if n.type in ('EXISTS', 'FORALL') and i == 0:
+			v = n.left.data
+			v_map = resolve_variable_collisions(
+				{v}, used_variables)
+			used_variables.add(v)
+			used_variables.add(v_map[v])
+			prev_v = variable_map.get(v, None)
+			variable_map[v] = v_map[v]
+			variable_map_from[v_map[v]] = prev_v
+			#n.left.data = v_map[v]
+			stack.append((n, 1))
+			stack.append((n.right, 0))
+		elif n.type in ('EXISTS', 'FORALL') and i == 1:
+			v = n.left.data
+			n.left.data = variable_map[v]
+			variable_map[v] = variable_map_from[variable_map[v]]
+		elif n.type == 'VARIABLE' and n.data in variable_map:
+			n.data = variable_map[n.data]
+		elif n.child:
+			stack.extend([(c, 0) for c in reversed(n.child)])
 	return node
 
-def _find_alphabet_set(node, const_alphs=set(), func_alphs=set()):
-	if node.type == 'CONST':
-		const_alphs.add(node.data)
-	if node.type == 'FUNCTION':
-		func_alphs.add(node.data)
-	if node.child:
-		for c in node.child:
-			_find_alphabet_set(c, const_alphs, func_alphs)
-	return (const_alphs, func_alphs)
+#TODO: use global used alphabet set
+def eliminate_existential_quantifiers(node):
+	constants = find_constants(node)
+	functions = find_functions(node)
+	skolem_map = dict()
 
-def eliminate_existential_quantifiers(node, parent=None,
-	vars=[], const_alphs=None, func_alphs=None, skolem_map={}):
-
-	root_node = node if not parent else None
-
-	if not const_alphs or not func_alphs: # called by root
-		const_alphs, func_alphs = _find_alphabet_set(node)
-
-	if node.type == 'FORALL':
-		vars.append(node.left.data)
-		vars.sort()
-		eliminate_existential_quantifiers(
-			node.right, node,
-			vars, const_alphs, func_alphs, skolem_map
-		)
-
-	elif node.type == 'EXISTS':
-		if len(vars) == 0:
-			alphs = sorted(list(set('abcde').difference(const_alphs)))
-			if len(alphs) == 0: raise RuntimeError('too many constants')
-			skolem_map[node.left.data] = Node('CONSTANT', alphs[0])
-			const_alphs.add(alphs[0])
-		else:
-			alphs = sorted(list(set('fghij').difference(func_alphs)))
-			if len(alphs) == 0: raise RuntimeError('too many functions')
-			skolem_map[node.left.data] = Node('FUNCTION', alphs[0])
-			skolem_map[node.left.data].child = [Node('VARIABLE', x) for x in vars]
-			func_alphs.add(alphs[0])
-
-		right = node.right
-		if parent:
-			index = parent.child.index(node)
-			parent.child[index] = right
-
-		top_node = eliminate_existential_quantifiers(
-			right, parent,
-			vars, const_alphs, func_alphs, skolem_map
-		)
-		if top_node: root_node = top_node
-		#return root_node
-
-	elif node.type == 'VARIABLE' and node.data in skolem_map:
-		parent.child[parent.child.index(node)] = deepcopy(skolem_map[node.data])
-
-	elif node.child:
-		for c in node.child:
-			eliminate_existential_quantifiers(
-				c, node,
-				vars, const_alphs, func_alphs, skolem_map
-			)
-
-	if node.type == 'FORALL':
-		vars.remove(node.left.data)
-
-	return root_node
+	node_stack = [(node, None, 0)]
+	variable_stack = []
+	while len(node_stack) > 0:
+		n, p, i = node_stack.pop()
+		if n.type == 'FORALL' and i == 0:
+			variable_stack.append(n.left.data)
+			node_stack.append((n, p, 1))
+			if n.child:
+				node_stack.extend([(c, n, 0) for c in n.child])
+		elif n.type == 'FORALL' and i == 1:
+			variable_stack.pop()
+		elif n.type == 'EXISTS':
+			if len(variable_stack) == 0:
+				alphs = set('abcde').difference(constants)
+				if len(alphs) == 0:
+					raise RuntimeError('too many constants')
+				alph = sorted(list(alphs))[0]
+				constants.add(alph)
+				skolem_map[n.left.data] = Node('CONSTANT', alph)
+			else:
+				alphs = set('fghij').difference(functions)
+				if len(alphs) == 0:
+					raise RuntimeError('too many functions')
+				alph = sorted(list(alphs))[0]
+				functions.add(alph)
+				skolem_map[n.left.data] = Node('FUNCTION', alph,
+					[Node('VARIABLE', v) for v in variable_stack])
+			if p == None:
+				node = n.right
+			else:
+				idx = p.child.index(n)
+				p.child[idx] = n.right
+			node_stack.append((n.right, p, 0))
+		elif n.type == 'VARIABLE' and n.data in skolem_map:
+			idx = p.child.index(n)
+			p.child[idx] = deepcopy(skolem_map[n.data])
+		elif n.child:
+			node_stack.extend([(c, n, 0) 
+				for c in reversed(n.child)])
+		pass
+	return node
 
 def move_quantifiers(node):
-	root = node
-	node_stack = [(None, node)]
+	node = node
+	node_stack = [(node, None)]
 	quantifier_list = []
 	while len(node_stack) > 0:
-		parent, node = node_stack.pop()
-		if node.type == 'FORALL' or node.type == 'EXISTS':
-			quantifier_list.append(Node(node.type, node.data, [node.left]))
-			if parent:
-				index = parent.child.index(node)
-				parent.child[index] = node.right
+		n, p = node_stack.pop()
+		if n.type == 'FORALL' or n.type == 'EXISTS':
+			quantifier_list.append(Node(n.type, n.data, [n.left]))
+			if p:
+				index = p.child.index(n)
+				p.child[index] = n.right
 			else:
-				root = node.right
-			node_stack.append((parent, node.right))
-		elif node.child:
-			node_stack.extend([(node, c) for c in node.child])
+				node = n.right
+			node_stack.append((n.right, n))
+		elif n.child:
+			node_stack.extend([(c, n) for c in n.child])
 
 	if len(quantifier_list) == 0:
-		return root
+		return node
 
 	quantifier_list.sort(key=lambda n: n.left.data)
 	quantifiers = None
@@ -193,7 +177,7 @@ def move_quantifiers(node):
 		else:
 			current_quantifier.right = quantifier
 			current_quantifier = quantifier
-	current_quantifier.right = root
+	current_quantifier.right = node
 
 	return quantifiers
 
@@ -232,4 +216,20 @@ def conjunctive_normal_form(node):
 	else:
 		node = matrix_tmp
 
+	return node
+
+def wff_to_cnf(node, dump_func=None):
+	if dump_func: print(dump_func(node))
+	node = eliminate_implication_and_iff(node)
+	if dump_func: print(dump_func(node))
+	node = move_negation(node)
+	if dump_func: print(dump_func(node))
+	node = standarize_variables(node)
+	if dump_func: print(dump_func(node))
+	node = eliminate_existential_quantifiers(node)
+	if dump_func: print(dump_func(node))
+	node = move_quantifiers(node)
+	if dump_func: print(dump_func(node))
+	node = conjunctive_normal_form(node)
+	if dump_func: print(dump_func(node))
 	return node
